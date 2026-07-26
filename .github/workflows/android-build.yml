@@ -4,6 +4,8 @@ on: [push]
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,3 +40,16 @@ jobs:
         with:
           name: hisab-tracker-apk
           path: android/app/build/outputs/apk/**/*.apk
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Hisab Tracker Latest Build"
+          body: "This is the latest compiled build of the Hisab Tracker Android app. Download the APK asset below to install it on your device."
+          draft: false
+          prerelease: false
+          files: |
+            android/app/build/outputs/apk/**/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
