@@ -46,9 +46,7 @@ import {
 import { translations } from "./translations";
 
 function getDefaultSources(lang) {
-  if (lang === "hi") return ["वजीफा", "सरकारी वजीफा", "फ्रीलांस"];
-  if (lang === "gu") return ["સ્ટાઇપેન્ડ", "સરકારી સ્ટાઇપેન્ડ", "ફ્રીલાન્સ"];
-  return ["Stipend", "Gov Stipend", "Freelance"];
+  return [];
 }
 
 // Custom SVG Icons (bypassing Lucide React)
@@ -93,7 +91,7 @@ export default function App() {
   const [heldReturns, setHeldReturns] = useState([]);
 
   // Customizable Income Sources
-  const [incomeSources, setIncomeSources] = useState(["Stipend", "Gov Stipend", "Freelance"]);
+  const [incomeSources, setIncomeSources] = useState([]);
 
   // Global History Filter States (lifted so they can be set from Dashboard)
   const [historyFilterMode, setHistoryFilterMode] = useState("all"); // all, month, year, custom
@@ -1446,44 +1444,46 @@ function SettingsTab({
         <Text style={styles.sectionLabel}>{t("customSourcesTitle")}</Text>
         <Text style={styles.taggingDescText}>{t("customSourcesDesc")}</Text>
         
-        <View style={{ marginTop: 8 }}>
-          <Text style={styles.btrLabel}>{t("sourceLabel1")}</Text>
-          <TextInput
-            style={styles.btrInput}
-            value={incomeSources[0] || ""}
-            onChangeText={(v) => {
-              const next = [...incomeSources];
-              next[0] = v;
-              onSaveSources(next);
-            }}
-          />
+        <View style={{ marginTop: 8, gap: 10 }}>
+          {incomeSources.map((src, index) => (
+            <View key={index} style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+              <TextInput
+                style={[styles.btrInput, { flex: 1, marginBottom: 0 }]}
+                placeholder={`${t("source")} ${index + 1}`}
+                placeholderTextColor="#52626C"
+                value={src}
+                onChangeText={(v) => {
+                  const next = [...incomeSources];
+                  next[index] = v;
+                  onSaveSources(next);
+                }}
+              />
+              <TouchableOpacity
+                onPress={() => {
+                  const next = incomeSources.filter((_, idx) => idx !== index);
+                  onSaveSources(next);
+                }}
+                style={[styles.editPenBtn, { backgroundColor: "#E8768A20", borderColor: "#E8768A40" }]}
+              >
+                <TrashIcon size={12} color="#E8768A" />
+              </TouchableOpacity>
+            </View>
+          ))}
         </View>
 
-        <View style={{ marginTop: 12 }}>
-          <Text style={styles.btrLabel}>{t("sourceLabel2")}</Text>
-          <TextInput
-            style={styles.btrInput}
-            value={incomeSources[1] || ""}
-            onChangeText={(v) => {
-              const next = [...incomeSources];
-              next[1] = v;
+        {incomeSources.length < 2 && (
+          <TouchableOpacity
+            style={[styles.addAccountSettingsBtn, { alignSelf: "flex-start", marginTop: 12 }]}
+            onPress={() => {
+              const next = [...incomeSources, ""];
               onSaveSources(next);
             }}
-          />
-        </View>
-
-        <View style={{ marginTop: 12 }}>
-          <Text style={styles.btrLabel}>{t("sourceLabel3")}</Text>
-          <TextInput
-            style={styles.btrInput}
-            value={incomeSources[2] || ""}
-            onChangeText={(v) => {
-              const next = [...incomeSources];
-              next[2] = v;
-              onSaveSources(next);
-            }}
-          />
-        </View>
+            activeOpacity={0.7}
+          >
+            <PlusIcon size={14} color="#4FD1AE" />
+            <Text style={styles.addAccountSettingsText}>{t("addIncomeSource")}</Text>
+          </TouchableOpacity>
+        )}
       </Card>
 
       {/* 3. Account Default Tagging */}
@@ -1620,7 +1620,7 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldReturns, inco
         setType(acc.type);
       }
     } else if (modal.type === "addIncome") {
-      setSource(incomeSources && incomeSources[0] ? incomeSources[0] : t("stipend"));
+      setSource(incomeSources && incomeSources[0] ? incomeSources[0] : t("other"));
       setAccountId(defaultSavingId || accounts[0]?.id || "");
     } else if (modal.type === "recordHeldReturn") {
       setAmount(String(modal.expenseAmount || ""));
