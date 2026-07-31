@@ -19,6 +19,8 @@ import * as Sharing from "expo-sharing";
 import * as DocumentPicker from "expo-document-picker";
 import * as Font from "expo-font";
 
+import * as Print from "expo-print";
+
 // Import Local helpers & DB functions
 import {
   initDb,
@@ -38,8 +40,16 @@ import {
   deleteTransaction,
   exportDbToJson,
   importJsonToDb,
+  getHeldReturns,
+  addHeldReturn,
 } from "./database";
 import { translations } from "./translations";
+
+function getDefaultSources(lang) {
+  if (lang === "hi") return ["वजीफा", "सरकारी वजीफा", "फ्रीलांस"];
+  if (lang === "gu") return ["સ્ટાઇપેન્ડ", "સરકારી સ્ટાઇપેન્ડ", "ફ્રીલાન્સ"];
+  return ["Stipend", "Gov Stipend", "Freelance"];
+}
 
 // Custom SVG Icons (bypassing Lucide React)
 import {
@@ -80,6 +90,18 @@ export default function App() {
   const [expenses, setExpenses] = useState([]);
   const [heldFunds, setHeldFunds] = useState([]);
   const [borrowings, setBorrowings] = useState([]);
+  const [heldReturns, setHeldReturns] = useState([]);
+
+  // Customizable Income Sources
+  const [incomeSources, setIncomeSources] = useState(["Stipend", "Gov Stipend", "Freelance"]);
+
+  // Global History Filter States (lifted so they can be set from Dashboard)
+  const [historyFilterMode, setHistoryFilterMode] = useState("all"); // all, month, year, custom
+  const [historyFilterMonth, setHistoryFilterMonth] = useState("all");
+  const [historyFilterYear, setHistoryFilterYear] = useState("all");
+  const [historyFilterStartDate, setHistoryFilterStartDate] = useState("");
+  const [historyFilterEndDate, setHistoryFilterEndDate] = useState("");
+  const [historyFilterType, setHistoryFilterType] = useState("all");
 
   // Load custom fonts from URL at runtime
   useEffect(() => {
@@ -109,9 +131,24 @@ export default function App() {
         const savedSettings = await AsyncStorage.getItem(SETTINGS_KEY);
         if (savedSettings) {
           const parsed = JSON.parse(savedSettings);
-          if (parsed.lang) setLang(parsed.lang);
+          if (parsed.lang) {
+            setLang(parsed.lang);
+            if (parsed.incomeSources && Array.isArray(parsed.incomeSources)) {
+              setIncomeSources(parsed.incomeSources);
+            } else {
+              setIncomeSources(getDefaultSources(parsed.lang));
+            }
+          } else {
+            if (parsed.incomeSources && Array.isArray(parsed.incomeSources)) {
+              setIncomeSources(parsed.incomeSources);
+            } else {
+              setIncomeSources(getDefaultSources("en"));
+            }
+          }
           if (parsed.defaultSavingId) setDefaultSavingId(parsed.defaultSavingId);
           if (parsed.defaultSpendingId) setDefaultSpendingId(parsed.defaultSpendingId);
+        } else {
+          setIncomeSources(getDefaultSources("en"));
         }
         
         refreshData();
@@ -124,12 +161,13 @@ export default function App() {
   }, []);
 
   // Save Settings to AsyncStorage
-  const saveSettings = async (nextLang, nextSavingId, nextSpendingId) => {
+  const saveSettings = async (nextLang, nextSavingId, nextSpendingId, nextSources) => {
     try {
       const obj = {
         lang: nextLang ?? lang,
         defaultSavingId: nextSavingId ?? defaultSavingId,
         defaultSpendingId: nextSpendingId ?? defaultSpendingId,
+        incomeSources: nextSources ?? incomeSources,
       };
       await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(obj));
     } catch (e) {
@@ -146,6 +184,7 @@ export default function App() {
     setExpenses(getExpenses());
     setHeldFunds(getHeldFunds());
     setBorrowings(getBorrowings());
+    setHeldReturns(getHeldReturns());
 
     // Auto primary account logic if only 1 account exists
     if (accList.length === 1) {
@@ -192,34 +231,69 @@ export default function App() {
     );
   };
 
-  // Backups: Export and Native Share (WhatsApp, Bluetooth, etc.)
-  const handleExportBackup = async () => {
+  // Backups: Export App Settings only
+  const handleExportSettingsBackup = async () => {
     try {
-      const backupDataStr = exportDbToJson();
-      const fileUri = FileSystem.documentDirectory + "hisab_backup.json";
-      
-      // Write database JSON string locally
-      await FileSystem.writeAsStringAsync(fileUri, backupDataStr, {
+      const obj = {
+        version: "hisab-settings-v1",
+        settings: {
+          lang,
+          defaultSavingId,
+          defaultSpendingId,
+          incomeSources,
+        }
+      };
+      const fileUri = FileSystem.documentDirectory + "hisab_settings_backup.json";
+      await FileSystem.writeAsStringAsync(fileUri, JSON.stringify(obj), {
         encoding: FileSystem.EncodingType.UTF8,
       });
 
-      // Invoke Android Share sheet
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(fileUri, {
-          dialogTitle: t("exportBackup"),
+          dialogTitle: t("settingsBackupOnly"),
           mimeType: "application/json",
         });
-        Alert.alert(t("exportBackup"), t("exportSuccess"));
       } else {
-        Alert.alert("Sharing unavailable on this device");
+        Alert.alert("Sharing unavailable");
       }
     } catch (err) {
       console.error(err);
-      Alert.alert("Backup Export Failed", err.message);
+      Alert.alert("Settings Backup Export Failed", err.message);
     }
   };
 
-  // Backups: Import and Restore via Document Picker
+  // Backups: Export Full Backup (Database + Settings)
+  const handleExportFullBackup = async () => {
+    try {
+      const dbJsonStr = exportDbToJson();
+      const parsed = JSON.parse(dbJsonStr);
+      parsed.settings = {
+        lang,
+        defaultSavingId,
+        defaultSpendingId,
+        incomeSources,
+      };
+
+      const fileUri = FileSystem.documentDirectory + "hisab_full_backup.json";
+      await FileSystem.writeAsStringAsync(fileUri, JSON.stringify(parsed), {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          dialogTitle: t("fullBackup"),
+          mimeType: "application/json",
+        });
+      } else {
+        Alert.alert("Sharing unavailable");
+      }
+    } catch (err) {
+      console.error(err);
+      Alert.alert("Full Backup Export Failed", err.message);
+    }
+  };
+
+  // Backups: Import and Restore via Document Picker (Auto-detect version/format)
   const handleImportBackup = async () => {
     try {
       const res = await DocumentPicker.getDocumentAsync({
@@ -235,10 +309,41 @@ export default function App() {
         encoding: FileSystem.EncodingType.UTF8,
       });
 
-      // Restore inside SQLite tables
-      importJsonToDb(fileContent);
-      refreshData();
-      Alert.alert(t("backupRestore"), t("importSuccess"));
+      const parsed = JSON.parse(fileContent);
+      if (!parsed) throw new Error("Invalid file content");
+
+      if (parsed.version === "hisab-settings-v1") {
+        // Settings-only backup
+        const s = parsed.settings;
+        if (s) {
+          if (s.lang) setLang(s.lang);
+          if (s.defaultSavingId) setDefaultSavingId(s.defaultSavingId);
+          if (s.defaultSpendingId) setDefaultSpendingId(s.defaultSpendingId);
+          if (s.incomeSources) setIncomeSources(s.incomeSources);
+          await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+        }
+        Alert.alert(t("backupRestore"), t("importSuccess"));
+      } else if (parsed.version === "sqlite-hisab-v1") {
+        // Database-only backup (old format)
+        importJsonToDb(fileContent);
+        refreshData();
+        Alert.alert(t("backupRestore"), t("importSuccess"));
+      } else if (parsed.version === "sqlite-hisab-v2") {
+        // Full backup (database + settings)
+        importJsonToDb(fileContent);
+        if (parsed.settings) {
+          const s = parsed.settings;
+          if (s.lang) setLang(s.lang);
+          if (s.defaultSavingId) setDefaultSavingId(s.defaultSavingId);
+          if (s.defaultSpendingId) setDefaultSpendingId(s.defaultSpendingId);
+          if (s.incomeSources) setIncomeSources(s.incomeSources);
+          await AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+        }
+        refreshData();
+        Alert.alert(t("backupRestore"), t("importSuccess"));
+      } else {
+        throw new Error("Unsupported backup file version");
+      }
     } catch (err) {
       console.error(err);
       Alert.alert(t("backupRestore"), t("importFailed"));
@@ -276,10 +381,21 @@ export default function App() {
             t={t}
             accounts={accounts}
             netWorth={netWorth}
-            totalIncome={totalIncome}
+            incomes={incomes}
             totalGivenToOthers={totalGivenToOthers}
             totalHeldRemaining={totalHeldRemaining}
             totalOwedToOthers={totalOwedToOthers}
+            onIncomePress={(mode) => {
+              setHistoryFilterType("income");
+              if (mode === "monthly") {
+                const currentMonth = new Date().toISOString().slice(0, 7);
+                setHistoryFilterMode("month");
+                setHistoryFilterMonth(currentMonth);
+              } else {
+                setHistoryFilterMode("all");
+              }
+              setTab("history");
+            }}
           />
         )}
         
@@ -315,12 +431,16 @@ export default function App() {
             t={t}
             heldFunds={heldFunds}
             borrowings={borrowings}
+            expenses={expenses}
+            heldReturns={heldReturns}
             heldRemaining={heldRemaining}
             borrowRemaining={borrowRemaining}
             onAddHeld={() => setModal({ type: "addHeld" })}
             onAddBorrow={() => setModal({ type: "addBorrow" })}
             onDeleteHeld={(id) => handleDeleteTransaction("held_funds", id)}
             onDeleteBorrow={(id) => handleDeleteTransaction("borrowings", id)}
+            onRecordReturn={(exp, heldEntry) => setModal({ type: "recordHeldReturn", expenseId: exp.id, expenseAmount: exp.amount, expensePerson: heldEntry.person, expenseNote: exp.note, heldId: heldEntry.id })}
+            onDeleteReturn={(returnId) => handleDeleteTransaction("held_return", returnId)}
           />
         )}
 
@@ -330,7 +450,20 @@ export default function App() {
             incomes={incomes}
             transfers={transfers}
             expenses={expenses}
+            heldReturns={heldReturns}
             onDelete={handleDeleteTransaction}
+            filterMode={historyFilterMode}
+            setFilterMode={setHistoryFilterMode}
+            filterMonth={historyFilterMonth}
+            setFilterMonth={setHistoryFilterMonth}
+            filterYear={historyFilterYear}
+            setFilterYear={setHistoryFilterYear}
+            filterStartDate={historyFilterStartDate}
+            setFilterStartDate={setHistoryFilterStartDate}
+            filterEndDate={historyFilterEndDate}
+            setFilterEndDate={setHistoryFilterEndDate}
+            filterType={historyFilterType}
+            setFilterType={setHistoryFilterType}
           />
         )}
 
@@ -353,9 +486,15 @@ export default function App() {
               setDefaultSpendingId(v);
               saveSettings(lang, defaultSavingId, v);
             }}
+            incomeSources={incomeSources}
+            onSaveSources={(newSources) => {
+              setIncomeSources(newSources);
+              saveSettings(lang, defaultSavingId, defaultSpendingId, newSources);
+            }}
             onAddAccount={() => setModal({ type: "addAccount" })}
             onEditAccount={(id) => setModal({ type: "editAccount", id })}
-            onExport={handleExportBackup}
+            onExportSettings={handleExportSettingsBackup}
+            onExportFull={handleExportFullBackup}
             onImport={handleImportBackup}
           />
         )}
@@ -441,7 +580,20 @@ function ListRow({ title, sub, amount, positive, onDelete }) {
 }
 
 // 1. Dashboard Tab View
-function DashboardTab({ t, accounts, netWorth, totalIncome, totalGivenToOthers, totalHeldRemaining, totalOwedToOthers }) {
+function DashboardTab({ t, accounts, netWorth, incomes, totalGivenToOthers, totalHeldRemaining, totalOwedToOthers, onIncomePress }) {
+  const [viewMode, setViewMode] = useState("monthly"); // monthly or lifetime
+
+  const currentMonthStr = useMemo(() => new Date().toISOString().slice(0, 7), []);
+  const monthlyIncome = useMemo(() => {
+    return incomes
+      .filter((e) => e.date.slice(0, 7) === currentMonthStr)
+      .reduce((s, e) => s + Number(e.amount), 0);
+  }, [incomes, currentMonthStr]);
+
+  const totalIncome = useMemo(() => {
+    return incomes.reduce((s, e) => s + Number(e.amount), 0);
+  }, [incomes]);
+
   return (
     <View>
       <Card style={styles.netWorthCard}>
@@ -465,9 +617,45 @@ function DashboardTab({ t, accounts, netWorth, totalIncome, totalGivenToOthers, 
         </Card>
       ))}
 
-      <Card>
-        <Text style={styles.labelAccent}>{t("lifetimeIncome")}</Text>
-        <Text style={styles.metricText}>{IndianRupee(totalIncome)}</Text>
+      {/* Income Card with Toggle & Tap Interaction */}
+      <Card style={{ paddingVertical: 12 }}>
+        <TouchableOpacity onPress={() => onIncomePress(viewMode)} activeOpacity={0.7}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <Text style={styles.labelAccent}>
+              {viewMode === "monthly" ? t("monthly") + " " + t("income") : t("lifetimeIncome")}
+            </Text>
+            
+            {/* Horizontal mini-toggle chips */}
+            <View style={{ flexDirection: "row", gap: 4, backgroundColor: "#101B27", padding: 2, borderRadius: 6, borderWidth: 1, borderColor: "#24313F" }}>
+              <TouchableOpacity
+                onPress={(e) => {
+                  e.stopPropagation();
+                  setViewMode("monthly");
+                }}
+                style={[{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }, viewMode === "monthly" && { backgroundColor: "#4FD1AE15" }]}
+              >
+                <Text style={[{ fontSize: 9, color: "#8CA0A8" }, viewMode === "monthly" && { color: "#4FD1AE", fontWeight: "bold" }]}>
+                  {t("monthly")}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={(e) => {
+                  e.stopPropagation();
+                  setViewMode("lifetime");
+                }}
+                style={[{ paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4 }, viewMode === "lifetime" && { backgroundColor: "#4FD1AE15" }]}
+              >
+                <Text style={[{ fontSize: 9, color: "#8CA0A8" }, viewMode === "lifetime" && { color: "#4FD1AE", fontWeight: "bold" }]}>
+                  {t("allTime")}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          <Text style={[styles.metricText, { color: "#4FD1AE", fontSize: 22, fontWeight: "600" }]}>
+            {IndianRupee(viewMode === "monthly" ? monthlyIncome : totalIncome)}
+          </Text>
+        </TouchableOpacity>
       </Card>
 
       <Card>
@@ -579,7 +767,7 @@ function SpendTab({ t, expenses, onAdd, onDelete }) {
 }
 
 // 5. Owe Tab View
-function OweTab({ t, heldFunds, borrowings, heldRemaining, borrowRemaining, onAddHeld, onAddBorrow, onDeleteHeld, onDeleteBorrow }) {
+function OweTab({ t, heldFunds, borrowings, expenses, heldReturns, heldRemaining, borrowRemaining, onAddHeld, onAddBorrow, onDeleteHeld, onDeleteBorrow, onRecordReturn, onDeleteReturn }) {
   return (
     <View>
       {/* Held Section */}
@@ -597,34 +785,123 @@ function OweTab({ t, heldFunds, borrowings, heldRemaining, borrowRemaining, onAd
       </TouchableOpacity>
 
       {heldFunds.length === 0 && <EmptyRow text={t("nothingHeldRightNow")} />}
-      {[...heldFunds].reverse().map((h) => (
-        <Card key={h.id}>
-          <View style={styles.oweRowHeader}>
-            <Text style={styles.owePersonName}>{h.person}</Text>
-            <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
-              <Text style={styles.oweDate}>{h.date}</Text>
-              <TouchableOpacity onPress={() => onDeleteHeld(h.id)} activeOpacity={0.7}>
-                <TrashIcon size={13} color="#E8768A" />
-              </TouchableOpacity>
+      {[...heldFunds].reverse().map((h) => {
+        const activeUses = expenses.filter(e => e.category === "heldUse" && e.ref_id === h.id);
+        const fundReturns = heldReturns.filter(r => r.held_id === h.id);
+
+        return (
+          <Card key={h.id}>
+            <View style={styles.oweRowHeader}>
+              <Text style={styles.owePersonName}>{h.person}</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                <Text style={styles.oweDate}>{h.date}</Text>
+                <TouchableOpacity onPress={() => onDeleteHeld(h.id)} activeOpacity={0.7}>
+                  <TrashIcon size={13} color="#E8768A" />
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
-          {h.note && <Text style={styles.oweNote}>{h.note}</Text>}
-          <View style={styles.oweSplitMetrics}>
-            <View>
-              <Text style={styles.oweMetricLabel}>{t("heldAmount")}</Text>
-              <Text style={styles.oweMetricVal}>{IndianRupee(h.amount)}</Text>
+            {h.note && <Text style={styles.oweNote}>{h.note}</Text>}
+            <View style={styles.oweSplitMetrics}>
+              <View>
+                <Text style={styles.oweMetricLabel}>{t("heldAmount")}</Text>
+                <Text style={styles.oweMetricVal}>{IndianRupee(h.amount)}</Text>
+              </View>
+              <View>
+                <Text style={styles.oweMetricLabel}>{t("usedAmount")}</Text>
+                <Text style={styles.oweMetricVal}>{IndianRupee(h.used)}</Text>
+              </View>
+              <View>
+                <Text style={styles.oweMetricLabel}>{t("remainingAmount")}</Text>
+                <Text style={[styles.oweMetricVal, { color: "#E8A34D" }]}>{IndianRupee(heldRemaining(h))}</Text>
+              </View>
             </View>
-            <View>
-              <Text style={styles.oweMetricLabel}>{t("usedAmount")}</Text>
-              <Text style={styles.oweMetricVal}>{IndianRupee(h.used)}</Text>
-            </View>
-            <View>
-              <Text style={styles.oweMetricLabel}>{t("remainingAmount")}</Text>
-              <Text style={[styles.oweMetricVal, { color: "#E8A34D" }]}>{IndianRupee(heldRemaining(h))}</Text>
-            </View>
-          </View>
-        </Card>
-      ))}
+
+            {/* List Active IPO Uses */}
+            {activeUses.length > 0 && (
+              <View style={{ marginTop: 12, borderTopWidth: 1, borderColor: "#1B2733", paddingTop: 8 }}>
+                <Text style={[styles.sectionLabel, { marginTop: 4, marginBottom: 4, fontSize: 10 }]}>
+                  {t("activeApplications")}
+                </Text>
+                {activeUses.map((exp) => {
+                  const returnRecord = fundReturns.find(r => r.expense_id === exp.id);
+                  return (
+                    <View key={exp.id} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 6, borderBottomWidth: 0.5, borderColor: "#1B2733" }}>
+                      <View style={{ flex: 1, marginRight: 8 }}>
+                        <Text style={{ color: "#EAF2F0", fontSize: 12 }}>
+                          {exp.note ? exp.note : t("usedHeldFundsMsg")}
+                        </Text>
+                        <Text style={{ color: "#8CA0A8", fontSize: 9, fontFamily: "IBM-Plex-Mono" }}>
+                          {exp.date} · {exp.accountName}
+                        </Text>
+                      </View>
+                      
+                      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                        <Text style={{ color: "#EAF2F0", fontSize: 12, fontFamily: "IBM-Plex-Mono", marginRight: 4 }}>
+                          {IndianRupee(exp.amount)}
+                        </Text>
+                        
+                        {returnRecord ? (
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                            <View style={{ backgroundColor: "#4FD1AE20", paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4, borderWidth: 1, borderColor: "#4FD1AE40" }}>
+                              <Text style={{ color: "#4FD1AE", fontSize: 9, fontWeight: "bold" }}>
+                                {t("settled")}
+                              </Text>
+                            </View>
+                            <TouchableOpacity onPress={() => onDeleteReturn(returnRecord.id)} activeOpacity={0.7} style={styles.rowDeleteBtn}>
+                              <TrashIcon size={10} color="#E8768A" />
+                            </TouchableOpacity>
+                          </View>
+                        ) : (
+                          <TouchableOpacity
+                            onPress={() => onRecordReturn(exp, h)}
+                            style={{ backgroundColor: "#E8A34D20", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6, borderWidth: 1, borderColor: "#E8A34D" }}
+                            activeOpacity={0.8}
+                          >
+                            <Text style={{ color: "#E8A34D", fontSize: 10, fontWeight: "bold" }}>
+                              {t("recordSettlement")}
+                            </Text>
+                          </TouchableOpacity>
+                        )}
+                      </View>
+                    </View>
+                  );
+                })}
+              </View>
+            )}
+
+            {/* List Settlements History */}
+            {fundReturns.length > 0 && (
+              <View style={{ marginTop: 12, borderTopWidth: 1, borderColor: "#1B2733", paddingTop: 8 }}>
+                <Text style={[styles.sectionLabel, { marginTop: 4, marginBottom: 4, fontSize: 10 }]}>
+                  {t("settlementDetails")}
+                </Text>
+                {fundReturns.map((ret) => (
+                  <View key={ret.id} style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 4, borderBottomWidth: 0.5, borderColor: "#1C2835" }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ color: "#8CA0A8", fontSize: 11 }}>
+                        {ret.note || t("recordSettlement")}
+                      </Text>
+                      <Text style={{ color: "#5F707A", fontSize: 9 }}>
+                        {ret.date} · {ret.accountName}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: "flex-end" }}>
+                      <Text style={{ color: "#4FD1AE", fontSize: 11, fontFamily: "IBM-Plex-Mono" }}>
+                        +{IndianRupee(ret.returned_amount)}
+                      </Text>
+                      {ret.profit_loss !== 0 && (
+                        <Text style={{ color: ret.profit_loss >= 0 ? "#4FD1AE" : "#E8768A", fontSize: 9, fontFamily: "IBM-Plex-Mono" }}>
+                          {ret.profit_loss >= 0 ? "+" : ""}{IndianRupee(ret.profit_loss)}
+                        </Text>
+                      )}
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+          </Card>
+        );
+      })}
 
       {/* Borrowings Section */}
       <Card style={[styles.owedCardDashed, { marginTop: 24 }]}>
@@ -674,10 +951,26 @@ function OweTab({ t, heldFunds, borrowings, heldRemaining, borrowRemaining, onAd
 }
 
 // 6. History Tab View (with dynamic SVG vector charts)
-function HistoryTab({ t, incomes, transfers, expenses, onDelete }) {
-  const [filterMonth, setFilterMonth] = useState("all");
-  const [filterType, setFilterType] = useState("all");
-
+function HistoryTab({
+  t,
+  incomes,
+  transfers,
+  expenses,
+  heldReturns,
+  onDelete,
+  filterMode,
+  setFilterMode,
+  filterMonth,
+  setFilterMonth,
+  filterYear,
+  setFilterYear,
+  filterStartDate,
+  setFilterStartDate,
+  filterEndDate,
+  setFilterEndDate,
+  filterType,
+  setFilterType,
+}) {
   const categoryLabels = useMemo(() => ({
     personal: t("personal"),
     given: t("given"),
@@ -685,6 +978,7 @@ function HistoryTab({ t, incomes, transfers, expenses, onDelete }) {
     borrowRepay: t("repayDebt"),
     income: t("income"),
     transfer: t("transfer"),
+    held_return: t("recordSettlement"),
   }), [t]);
 
   // Merge SQLite tables into a unified chronologically sorted log
@@ -703,9 +997,12 @@ function HistoryTab({ t, incomes, transfers, expenses, onDelete }) {
       if (e.category === "borrowRepay") labelText = `${t("repaidPrefix")} ${e.person}`;
       list.push({ id: e.id, date: e.date, category: e.category, title: labelText, amount: e.amount, sign: -1 });
     });
+    heldReturns.forEach((hr) =>
+      list.push({ id: hr.id, date: hr.date, category: "held_return", title: `${t("recordSettlement")}: ${hr.person} → ${hr.accountName}`, amount: hr.returned_amount, sign: 1 })
+    );
     // Sort descending
     return list.sort((a, b) => b.date.localeCompare(a.date));
-  }, [incomes, transfers, expenses, t]);
+  }, [incomes, transfers, expenses, heldReturns, t]);
 
   // Extract unique months YYYY-MM
   const months = useMemo(() => {
@@ -713,14 +1010,29 @@ function HistoryTab({ t, incomes, transfers, expenses, onDelete }) {
     return Array.from(set).sort().reverse();
   }, [allLogs]);
 
-  // Filter conditions
+  // Extract unique years YYYY
+  const years = useMemo(() => {
+    const set = new Set(allLogs.map((log) => log.date.slice(0, 4)));
+    return Array.from(set).sort().reverse();
+  }, [allLogs]);
+
+  // Filter conditions based on active mode
   const filtered = useMemo(() => {
     return allLogs.filter((log) => {
-      if (filterMonth !== "all" && log.date.slice(0, 7) !== filterMonth) return false;
+      // 1. Period filter
+      if (filterMode === "month" && filterMonth !== "all" && !log.date.startsWith(filterMonth)) return false;
+      if (filterMode === "year" && filterYear !== "all" && !log.date.startsWith(filterYear)) return false;
+      if (filterMode === "custom") {
+        if (filterStartDate && log.date < filterStartDate) return false;
+        if (filterEndDate && log.date > filterEndDate) return false;
+      }
+      
+      // 2. Type filter
       if (filterType !== "all" && log.category !== filterType) return false;
+      
       return true;
     });
-  }, [allLogs, filterMonth, filterType]);
+  }, [allLogs, filterMode, filterMonth, filterYear, filterStartDate, filterEndDate, filterType]);
 
   const spentTotal = useMemo(() => filtered.filter((i) => i.sign === -1).reduce((s, i) => s + i.amount, 0), [filtered]);
   const incomeTotal = useMemo(() => filtered.filter((i) => i.sign === 1).reduce((s, i) => s + i.amount, 0), [filtered]);
@@ -736,12 +1048,210 @@ function HistoryTab({ t, incomes, transfers, expenses, onDelete }) {
 
   const maxSpentInCategory = categoriesBreakdown.length > 0 ? categoriesBreakdown[0][1] : 1;
 
+  // Document Export: CSV (Excel compatible)
+  const handleExportCsv = async () => {
+    try {
+      let csvContent = "Date,Type,Title,Amount,Direction\n";
+      filtered.forEach((log) => {
+        const typeStr = categoryLabels[log.category] || log.category;
+        const cleanTitle = (log.title || "").replace(/,/g, " ");
+        const direction = log.sign === 1 ? "IN" : log.sign === -1 ? "OUT" : "TRANSFER";
+        csvContent += `${log.date},${typeStr},${cleanTitle},${log.amount},${direction}\n`;
+      });
+
+      const fileUri = FileSystem.documentDirectory + `hisab_report_${new Date().toISOString().slice(0, 10)}.csv`;
+      await FileSystem.writeAsStringAsync(fileUri, csvContent, {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(fileUri, {
+          dialogTitle: t("exportCsv"),
+          mimeType: "text/csv",
+        });
+      } else {
+        Alert.alert("Sharing unavailable");
+      }
+    } catch (err) {
+      console.error(err);
+      Alert.alert("CSV Export Failed", err.message);
+    }
+  };
+
+  // Document Export: PDF Report via expo-print
+  const handleExportPdf = async () => {
+    try {
+      let tableRows = "";
+      filtered.forEach((log) => {
+        const typeStr = categoryLabels[log.category] || log.category;
+        const color = log.sign === 1 ? "#4FD1AE" : log.sign === -1 ? "#E8768A" : "#EAF2F0";
+        const signStr = log.sign === 1 ? "+" : log.sign === -1 ? "-" : "";
+        tableRows += `
+          <tr style="border-bottom: 1px solid #1F2A38;">
+            <td style="padding: 10px; font-family: monospace;">${log.date}</td>
+            <td style="padding: 10px; font-weight: bold;">${typeStr}</td>
+            <td style="padding: 10px; color: #8CA0A8;">${log.title}</td>
+            <td style="padding: 10px; text-align: right; font-family: monospace; color: ${color}; font-weight: bold;">
+              ${signStr}₹${log.amount.toFixed(2)}
+            </td>
+          </tr>
+        `;
+      });
+
+      const htmlContent = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <title>${t("appTitle")} - Report</title>
+          <style>
+            body {
+              font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+              background-color: #0F1620;
+              color: #EAF2F0;
+              margin: 40px;
+            }
+            .header {
+              border-bottom: 2px solid #4FD1AE;
+              padding-bottom: 20px;
+              margin-bottom: 20px;
+            }
+            .title {
+              font-size: 24px;
+              color: #4FD1AE;
+              font-weight: bold;
+              text-transform: uppercase;
+              letter-spacing: 1px;
+            }
+            .subtitle {
+              color: #8CA0A8;
+              font-size: 14px;
+              margin-top: 5px;
+            }
+            .summary {
+              display: flex;
+              gap: 20px;
+              margin-bottom: 30px;
+            }
+            .card {
+              flex: 1;
+              background-color: #141F2C;
+              border: 1px solid #1F2A38;
+              border-radius: 10px;
+              padding: 15px;
+            }
+            .card-label {
+              font-size: 11px;
+              color: #8CA0A8;
+              text-transform: uppercase;
+            }
+            .card-value {
+              font-size: 20px;
+              font-weight: bold;
+              margin-top: 5px;
+              font-family: monospace;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+            }
+            th {
+              background-color: #141F2C;
+              color: #4FD1AE;
+              text-align: left;
+              padding: 10px;
+              font-weight: bold;
+              border-bottom: 2px solid #1F2A38;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <div class="title">${t("appTitle")} - ${t("history")}</div>
+            <div class="subtitle">Generated on ${new Date().toLocaleDateString()}</div>
+          </div>
+          
+          <div class="summary">
+            <div class="card">
+              <div class="card-label">${t("incomeLabel")}</div>
+              <div class="card-value" style="color: #4FD1AE;">₹${incomeTotal.toFixed(2)}</div>
+            </div>
+            <div class="card">
+              <div class="card-label">${t("spentLabel")}</div>
+              <div class="card-value" style="color: #E8768A;">₹${spentTotal.toFixed(2)}</div>
+            </div>
+            <div class="card">
+              <div class="card-label">${t("netSavings")}</div>
+              <div class="card-value" style="color: #EAF2F0;">₹${(incomeTotal - spentTotal).toFixed(2)}</div>
+            </div>
+          </div>
+          
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Description</th>
+                <th style="text-align: right;">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${tableRows}
+            </tbody>
+          </table>
+        </body>
+        </html>
+      `;
+
+      const { uri } = await Print.printToFileAsync({ html: htmlContent });
+      
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, {
+          dialogTitle: t("exportPdf"),
+          mimeType: "application/pdf",
+        });
+      } else {
+        Alert.alert("Sharing unavailable");
+      }
+    } catch (err) {
+      console.error(err);
+      Alert.alert("PDF Export Failed", err.message);
+    }
+  };
+
   return (
     <View>
-      {/* Filtering Selectors */}
+      {/* 1. Document Export Section */}
+      <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+        <TouchableOpacity onPress={handleExportPdf} style={[styles.addBtn, { flex: 1, marginTop: 0, backgroundColor: "#E8A34D" }]} activeOpacity={0.8}>
+          <Text style={[styles.addBtnText, { color: "#0F1620" }]}>{t("exportPdf")}</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={handleExportCsv} style={[styles.addBtn, { flex: 1, marginTop: 0 }]} activeOpacity={0.8}>
+          <Text style={styles.addBtnText}>{t("exportCsv")}</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* 2. Filtering Period Selector */}
       <View style={styles.historyFilterRow}>
-        <View style={{ flex: 1, backgroundColor: "#101B27", borderRadius: 10, borderWidth: 1, borderColor: "#24313F" }}>
-          {/* Custom selector mockup */}
+        <Text style={styles.btrLabel}>{t("historyFilterMode")}</Text>
+        <View style={styles.segControl}>
+          {["all", "month", "year", "custom"].map((mode) => (
+            <TouchableOpacity
+              key={mode}
+              onPress={() => setFilterMode(mode)}
+              style={[styles.segBtn, filterMode === mode && styles.segBtnActive]}
+            >
+              <Text style={[styles.segBtnText, filterMode === mode && styles.segBtnTextActive]}>
+                {mode === "all" ? t("allTime") : mode === "month" ? t("monthly") : mode === "year" ? t("yearly") : t("customRange")}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
+      {/* 3. Sub-period filters */}
+      {filterMode === "month" && (
+        <View style={{ marginTop: 10, backgroundColor: "#101B27", borderRadius: 10, borderWidth: 1, borderColor: "#24313F" }}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ padding: 8, gap: 8 }}>
             <TouchableOpacity onPress={() => setFilterMonth("all")} style={[styles.filterChip, filterMonth === "all" && styles.filterChipActive]}>
               <Text style={[styles.filterChipText, filterMonth === "all" && styles.filterChipTextActive]}>{t("allTime")}</Text>
@@ -753,10 +1263,50 @@ function HistoryTab({ t, incomes, transfers, expenses, onDelete }) {
             ))}
           </ScrollView>
         </View>
-      </View>
+      )}
 
+      {filterMode === "year" && (
+        <View style={{ marginTop: 10, backgroundColor: "#101B27", borderRadius: 10, borderWidth: 1, borderColor: "#24313F" }}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ padding: 8, gap: 8 }}>
+            <TouchableOpacity onPress={() => setFilterYear("all")} style={[styles.filterChip, filterYear === "all" && styles.filterChipActive]}>
+              <Text style={[styles.filterChipText, filterYear === "all" && styles.filterChipTextActive]}>{t("allTime")}</Text>
+            </TouchableOpacity>
+            {years.map((y) => (
+              <TouchableOpacity key={y} onPress={() => setFilterYear(y)} style={[styles.filterChip, filterYear === y && styles.filterChipActive]}>
+                <Text style={[styles.filterChipText, filterYear === y && styles.filterChipTextActive]}>{y}</Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {filterMode === "custom" && (
+        <View style={{ flexDirection: "row", gap: 10, marginTop: 10 }}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.btrLabel}>{t("startDate")}</Text>
+            <TextInput
+              style={styles.btrInput}
+              placeholder="YYYY-MM-DD"
+              placeholderTextColor="#52626C"
+              value={filterStartDate}
+              onChangeText={setFilterStartDate}
+            />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.btrLabel}>{t("endDate")}</Text>
+            <TextInput
+              style={styles.btrInput}
+              placeholder="YYYY-MM-DD"
+              placeholderTextColor="#52626C"
+              value={filterEndDate}
+              onChangeText={setFilterEndDate}
+            />
+          </View>
+        </View>
+      )}
+
+      {/* 4. Filter Transaction Type */}
       <View style={{ height: 8 }} />
-
       <View style={{ backgroundColor: "#101B27", borderRadius: 10, borderWidth: 1, borderColor: "#24313F", padding: 8 }}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
           <TouchableOpacity onPress={() => setFilterType("all")} style={[styles.filterChip, filterType === "all" && styles.filterChipActive]}>
@@ -770,7 +1320,7 @@ function HistoryTab({ t, incomes, transfers, expenses, onDelete }) {
         </ScrollView>
       </View>
 
-      {/* Income/Spent Overview cards */}
+      {/* 5. Income/Spent Overview cards */}
       <View style={styles.historySumsRow}>
         <Card style={{ flex: 1, marginTop: 0 }}>
           <Text style={styles.labelAccent}>{t("incomeLabel")}</Text>
@@ -782,7 +1332,7 @@ function HistoryTab({ t, incomes, transfers, expenses, onDelete }) {
         </Card>
       </View>
 
-      {/* Custom Vector Category Chart */}
+      {/* 6. Custom Vector Category Chart */}
       {categoriesBreakdown.length > 0 && (
         <Card>
           <Text style={styles.sectionLabel}>{t("byCategory")}</Text>
@@ -805,7 +1355,7 @@ function HistoryTab({ t, incomes, transfers, expenses, onDelete }) {
         </Card>
       )}
 
-      {/* Transaction Log list */}
+      {/* 7. Transaction Log list */}
       <Card>
         <Text style={styles.sectionLabel}>{t("transactions")}</Text>
         {filtered.length === 0 && <EmptyRow text={t("nothingHereYet")} />}
@@ -834,9 +1384,12 @@ function SettingsTab({
   setDefaultSavingId,
   defaultSpendingId,
   setDefaultSpendingId,
+  incomeSources,
+  onSaveSources,
   onAddAccount,
   onEditAccount,
-  onExport,
+  onExportSettings,
+  onExportFull,
   onImport,
 }) {
   return (
@@ -886,6 +1439,51 @@ function SettingsTab({
         ))}
       </Card>
 
+      {/* 2.5 Customizable Income Sources */}
+      <Card>
+        <Text style={styles.sectionLabel}>{t("customSourcesTitle")}</Text>
+        <Text style={styles.taggingDescText}>{t("customSourcesDesc")}</Text>
+        
+        <View style={{ marginTop: 8 }}>
+          <Text style={styles.btrLabel}>{t("sourceLabel1")}</Text>
+          <TextInput
+            style={styles.btrInput}
+            value={incomeSources[0] || ""}
+            onChangeText={(v) => {
+              const next = [...incomeSources];
+              next[0] = v;
+              onSaveSources(next);
+            }}
+          />
+        </View>
+
+        <View style={{ marginTop: 12 }}>
+          <Text style={styles.btrLabel}>{t("sourceLabel2")}</Text>
+          <TextInput
+            style={styles.btrInput}
+            value={incomeSources[1] || ""}
+            onChangeText={(v) => {
+              const next = [...incomeSources];
+              next[1] = v;
+              onSaveSources(next);
+            }}
+          />
+        </View>
+
+        <View style={{ marginTop: 12 }}>
+          <Text style={styles.btrLabel}>{t("sourceLabel3")}</Text>
+          <TextInput
+            style={styles.btrInput}
+            value={incomeSources[2] || ""}
+            onChangeText={(v) => {
+              const next = [...incomeSources];
+              next[2] = v;
+              onSaveSources(next);
+            }}
+          />
+        </View>
+      </Card>
+
       {/* 3. Account Default Tagging */}
       {accounts.length > 0 && (
         <Card>
@@ -922,8 +1520,12 @@ function SettingsTab({
       <Card>
         <Text style={styles.sectionLabel}>{t("backupRestore")}</Text>
         <View style={{ marginTop: 10, gap: 10 }}>
-          <TouchableOpacity style={styles.settingsBackupBtn} onPress={onExport} activeOpacity={0.8}>
-            <Text style={styles.settingsBackupBtnText}>{t("exportBackup")}</Text>
+          <TouchableOpacity style={styles.settingsBackupBtn} onPress={onExportSettings} activeOpacity={0.8}>
+            <Text style={styles.settingsBackupBtnText}>{t("settingsBackupOnly")}</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.settingsBackupBtn} onPress={onExportFull} activeOpacity={0.8}>
+            <Text style={styles.settingsBackupBtnText}>{t("fullBackup")}</Text>
           </TouchableOpacity>
           
           <TouchableOpacity style={[styles.settingsBackupBtn, { backgroundColor: "#101B27", borderWidth: 1, borderColor: "#24313F" }]} onPress={onImport} activeOpacity={0.8}>
@@ -979,12 +1581,13 @@ function ModalPicker({ options, value, onChange, t }) {
 
 // ----------------- MODALS ROUTER -----------------
 
-function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, borrowRemaining, defaultSavingId, defaultSpendingId, t, onClose, onSuccess }) {
+function ModalRouter({ modal, accounts, heldFunds, borrowings, heldReturns, incomeSources, heldRemaining, borrowRemaining, defaultSavingId, defaultSpendingId, t, onClose, onSuccess }) {
   const [name, setName] = useState("");
   const [balance, setBalance] = useState("");
   const [type, setType] = useState("other");
 
-  const [source, setSource] = useState(t("stipend"));
+  const [source, setSource] = useState("");
+  const [customSourceText, setCustomSourceText] = useState("");
   const [amount, setAmount] = useState("");
   const [accountId, setAccountId] = useState(defaultSavingId || accounts[0]?.id || "");
   const [transferToId, setTransferToId] = useState(defaultSpendingId || accounts[1]?.id || accounts[0]?.id || "");
@@ -999,6 +1602,13 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, bo
   // Owe tab adds
   const [person, setPerson] = useState("");
 
+  // Held Return states
+  const [principalReturned, setPrincipalReturned] = useState("");
+  const [friendProfitShare, setFriendProfitShare] = useState("");
+  const [keepPrincipal, setKeepPrincipal] = useState(true);
+  const [keepProfit, setKeepProfit] = useState(true);
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+
   // Pre-load parameters on load
   useEffect(() => {
     if (modal.type === "editAccount") {
@@ -1007,8 +1617,19 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, bo
         setName(acc.name);
         setType(acc.type);
       }
+    } else if (modal.type === "addIncome") {
+      setSource(incomeSources && incomeSources[0] ? incomeSources[0] : t("stipend"));
+      setAccountId(defaultSavingId || accounts[0]?.id || "");
+    } else if (modal.type === "recordHeldReturn") {
+      setAmount(String(modal.expenseAmount || ""));
+      setPrincipalReturned(String(modal.expenseAmount || ""));
+      setAccountId(defaultSavingId || accounts[0]?.id || "");
+      setDate(new Date().toISOString().slice(0, 10));
+      setNote(modal.expenseNote ? `${t("recordSettlement")} - ${modal.expenseNote}` : t("recordSettlement"));
+      setKeepPrincipal(true);
+      setKeepProfit(true);
     }
-  }, [modal, accounts]);
+  }, [modal, accounts, incomeSources, defaultSavingId]);
 
   // Resolve pre-selection logic for expenses
   useEffect(() => {
@@ -1016,6 +1637,17 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, bo
       setAccountId(defaultSpendingId || accounts[0]?.id || "");
     }
   }, [modal, defaultSpendingId, accounts]);
+
+  // Dynamically compute default friend profit share when amount or principal changes
+  useEffect(() => {
+    if (modal.type === "recordHeldReturn") {
+      const p = (Number(amount) || 0) - (Number(principalReturned) || 0);
+      setFriendProfitShare(p > 0 ? String(p) : "0");
+    }
+  }, [amount, principalReturned, modal.type]);
+
+  const refundAmt = Number(amount) || 0;
+  const princAmt = Number(principalReturned) || 0;
 
   const handleSubmit = () => {
     if (modal.type === "addAccount") {
@@ -1031,7 +1663,8 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, bo
     else if (modal.type === "addIncome") {
       const amt = Number(amount) || 0;
       if (amt <= 0 || !accountId) return;
-      addIncome(source, amt, accountId);
+      const finalSource = source === t("other") ? (customSourceText.trim() || t("other")) : source;
+      addIncome(finalSource, amt, accountId);
     } 
     
     else if (modal.type === "transfer") {
@@ -1064,6 +1697,28 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, bo
       addBorrowing(person, amt, accountId, note);
     }
 
+    else if (modal.type === "recordHeldReturn") {
+      const amt = Number(amount) || 0;
+      const princ = Number(principalReturned) || 0;
+      const pLoss = amt - princ;
+      const fShare = Number(friendProfitShare) || 0;
+      if (amt <= 0 || !accountId || !modal.heldId || !modal.expenseId) return;
+
+      addHeldReturn(
+        modal.heldId,
+        modal.expenseId,
+        accountId,
+        amt,
+        princ,
+        pLoss,
+        fShare,
+        keepPrincipal,
+        keepProfit,
+        date,
+        note
+      );
+    }
+
     onSuccess();
   };
 
@@ -1075,6 +1730,7 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, bo
     if (modal.type === "addExpense") return t("logExpense");
     if (modal.type === "addHeld") return t("addHeldFunds");
     if (modal.type === "addBorrow") return t("addBorrowing");
+    if (modal.type === "recordHeldReturn") return t("recordSettlement");
     return "";
   };
 
@@ -1134,16 +1790,34 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, bo
               <View>
                 <Text style={styles.btrLabel}>{t("source")}</Text>
                 <View style={styles.segControl}>
-                  {[t("stipend"), t("govStipend"), t("other")].map((sKey) => (
+                  {[...incomeSources, t("other")].map((sKey) => (
                     <TouchableOpacity
                       key={sKey}
-                      onPress={() => setSource(sKey)}
+                      onPress={() => {
+                        setSource(sKey);
+                        if (sKey !== t("other")) {
+                          setCustomSourceText("");
+                        }
+                      }}
                       style={[styles.segBtn, source === sKey && styles.segBtnActive]}
                     >
-                      <Text style={[styles.segBtnText, source === sKey && styles.segBtnTextActive]}>{sKey}</Text>
+                      <Text style={[styles.segBtnText, source === sKey && styles.segBtnTextActive]} numberOfLines={1}>{sKey}</Text>
                     </TouchableOpacity>
                   ))}
                 </View>
+
+                {source === t("other") && (
+                  <View style={{ marginTop: 12 }}>
+                    <Text style={styles.btrLabel}>{t("enterOtherSource")}</Text>
+                    <TextInput
+                      style={styles.btrInput}
+                      placeholder={t("otherSourcePlaceholder")}
+                      placeholderTextColor="#52626C"
+                      value={customSourceText}
+                      onChangeText={setCustomSourceText}
+                    />
+                  </View>
+                )}
 
                 <View style={{ marginTop: 12 }}>
                   <Text style={styles.btrLabel}>{t("amountReceived")}</Text>
@@ -1209,13 +1883,6 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, bo
                   </View>
                 )}
 
-                {category === "personal" && (
-                  <View style={{ marginTop: 12 }}>
-                    <Text style={styles.btrLabel}>{t("noteOpt")}</Text>
-                    <TextInput style={styles.btrInput} placeholder="Coffee, grocery, etc." placeholderTextColor="#52626C" value={note} onChangeText={setNote} />
-                  </View>
-                )}
-
                 {category === "heldUse" && (
                   heldFunds.length === 0 ? (
                     <Text style={styles.formWarningText}>No held funds yet. Add some in the Owe tab first.</Text>
@@ -1262,6 +1929,17 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, bo
                 <View style={{ marginTop: 12 }}>
                   <Text style={styles.btrLabel}>{t("amount")}</Text>
                   <TextInput style={styles.btrInput} keyboardType="numeric" placeholder="0" placeholderTextColor="#52626C" value={amount} onChangeText={setAmount} />
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.btrLabel}>{t("noteOpt")}</Text>
+                  <TextInput
+                    style={styles.btrInput}
+                    placeholder={category === "heldUse" ? "e.g., Hyundai IPO, Zomato IPO" : "Coffee, grocery, etc."}
+                    placeholderTextColor="#52626C"
+                    value={note}
+                    onChangeText={setNote}
+                  />
                 </View>
               </View>
             )}
@@ -1312,6 +1990,81 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldRemaining, bo
                 <View style={{ marginTop: 12 }}>
                   <Text style={styles.btrLabel}>{t("noteOpt")}</Text>
                   <TextInput style={styles.btrInput} placeholder="Emergency fund, etc." placeholderTextColor="#52626C" value={note} onChangeText={setNote} />
+                </View>
+              </View>
+            )}
+
+            {/* Record Held Return Modal Form */}
+            {modal.type === "recordHeldReturn" && (
+              <View>
+                <Text style={styles.owePersonName}>{t("settlementDetails")}</Text>
+                <Text style={[styles.oweNote, { marginBottom: 12 }]}>
+                  {t("heldForOthers")}: {modal.expensePerson} · {t("amount")}: {IndianRupee(modal.expenseAmount)}
+                </Text>
+
+                <View>
+                  <Text style={styles.btrLabel}>{t("refundAmount")}</Text>
+                  <TextInput style={styles.btrInput} keyboardType="numeric" placeholder="0" placeholderTextColor="#52626C" value={amount} onChangeText={setAmount} />
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.btrLabel}>{t("principalAmount")}</Text>
+                  <TextInput style={styles.btrInput} keyboardType="numeric" placeholder="0" placeholderTextColor="#52626C" value={principalReturned} onChangeText={setPrincipalReturned} />
+                </View>
+
+                <View style={{ marginTop: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <Text style={styles.btrLabel}>{t("profitLoss")}</Text>
+                  <Text style={[styles.accountBalanceText, { color: (refundAmt - princAmt) >= 0 ? "#4FD1AE" : "#E8768A" }]}>
+                    {IndianRupee(refundAmt - princAmt)}
+                  </Text>
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.btrLabel}>{t("friendProfitShare")}</Text>
+                  <TextInput style={styles.btrInput} keyboardType="numeric" placeholder="0" placeholderTextColor="#52626C" value={friendProfitShare} onChangeText={setFriendProfitShare} />
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.btrLabel}>{t("goesInto")}</Text>
+                  <View style={styles.pickerWrapper}>
+                    <ModalPicker options={accounts} value={accountId} onChange={setAccountId} t={t} />
+                  </View>
+                </View>
+
+                <View style={{ marginTop: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <Text style={[styles.btrLabel, { width: "65%" }]}>{t("keepPrincipal")}</Text>
+                  <TouchableOpacity
+                    onPress={() => setKeepPrincipal(!keepPrincipal)}
+                    style={[styles.segBtn, { flex: 0, width: 80 }, keepPrincipal && styles.segBtnActive]}
+                  >
+                    <Text style={[styles.segBtnText, keepPrincipal && styles.segBtnTextActive]}>
+                      {keepPrincipal ? t("save") : t("cancel")}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+
+                {Number(friendProfitShare) > 0 && (
+                  <View style={{ marginTop: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                    <Text style={[styles.btrLabel, { width: "65%" }]}>{t("keepProfit")}</Text>
+                    <TouchableOpacity
+                      onPress={() => setKeepProfit(!keepProfit)}
+                      style={[styles.segBtn, { flex: 0, width: 80 }, keepProfit && styles.segBtnActive]}
+                    >
+                      <Text style={[styles.segBtnText, keepProfit && styles.segBtnTextActive]}>
+                        {keepProfit ? t("save") : t("cancel")}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.btrLabel}>{t("startDate")}</Text>
+                  <TextInput style={styles.btrInput} placeholder="YYYY-MM-DD" placeholderTextColor="#52626C" value={date} onChangeText={setDate} />
+                </View>
+
+                <View style={{ marginTop: 12 }}>
+                  <Text style={styles.btrLabel}>{t("noteOpt")}</Text>
+                  <TextInput style={styles.btrInput} placeholder="e.g. IPO returned" placeholderTextColor="#52626C" value={note} onChangeText={setNote} />
                 </View>
               </View>
             )}

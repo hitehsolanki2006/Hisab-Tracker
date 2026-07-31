@@ -9,3 +9,4 @@ web-build/
 .history/
 *.apk
 *.zip
+hunter-site/

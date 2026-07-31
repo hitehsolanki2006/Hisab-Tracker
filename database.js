@@ -73,6 +73,21 @@ export function initDb() {
       note TEXT,
       date TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS held_returns (
+      id TEXT PRIMARY KEY,
+      held_id TEXT NOT NULL,
+      expense_id TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      returned_amount REAL NOT NULL,
+      principal_returned REAL NOT NULL,
+      profit_loss REAL NOT NULL,
+      friend_profit_share REAL NOT NULL,
+      keep_principal INTEGER NOT NULL,
+      keep_profit INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      note TEXT
+    );
   `);
 
   // Insert default accounts if none exist
@@ -259,6 +274,38 @@ export function deleteTransaction(type, transactionId) {
     db.runSync('DELETE FROM borrowings WHERE id = ?', transactionId);
   } 
   
+  else if (type === 'held_return') {
+    const item = db.getFirstSync('SELECT * FROM held_returns WHERE id = ?', transactionId);
+    if (!item) return;
+
+    const princ = Number(item.principal_returned) || 0;
+    const amt = Number(item.returned_amount) || 0;
+    const fShare = Number(item.friend_profit_share) || 0;
+    const kp = item.keep_principal === 1;
+    const kpr = item.keep_profit === 1;
+
+    // 1. Revert Account changes:
+    db.runSync('UPDATE accounts SET balance = balance - ? WHERE id = ?', amt, item.account_id);
+    if (!kp) {
+      db.runSync('UPDATE accounts SET balance = balance + ? WHERE id = ?', princ, item.account_id);
+    }
+    if (!kpr && fShare > 0) {
+      db.runSync('UPDATE accounts SET balance = balance + ? WHERE id = ?', fShare, item.account_id);
+    }
+
+    // 2. Revert Held Fund changes:
+    db.runSync('UPDATE held_funds SET used = used + ? WHERE id = ?', princ, item.held_id);
+    if (!kp) {
+      db.runSync('UPDATE held_funds SET amount = amount + ? WHERE id = ?', princ, item.held_id);
+    }
+    if (kpr && fShare > 0) {
+      db.runSync('UPDATE held_funds SET amount = amount - ? WHERE id = ?', fShare, item.held_id);
+    }
+
+    // 3. Delete record
+    db.runSync('DELETE FROM held_returns WHERE id = ?', transactionId);
+  }
+
   else {
     // This is an expense (personal, given, heldUse, or borrowRepay)
     const item = db.getFirstSync('SELECT * FROM expenses WHERE id = ?', transactionId);
@@ -281,6 +328,58 @@ export function deleteTransaction(type, transactionId) {
   }
 }
 
+// Held Returns Queries
+export function getHeldReturns() {
+  return db.getAllSync('SELECT hr.*, a.name as accountName, h.person as person FROM held_returns hr JOIN accounts a ON hr.account_id = a.id JOIN held_funds h ON hr.held_id = h.id');
+}
+
+export function addHeldReturn(heldId, expenseId, accountId, returnedAmount, principalReturned, profitLoss, friendProfitShare, keepPrincipal, keepProfit, date, note) {
+  const id = uid();
+  const amt = Number(returnedAmount) || 0;
+  const princ = Number(principalReturned) || 0;
+  const pLoss = Number(profitLoss) || 0;
+  const fShare = Number(friendProfitShare) || 0;
+  const d = date || todayStr();
+
+  const kp = keepPrincipal ? 1 : 0;
+  const kpr = keepProfit ? 1 : 0;
+
+  // Insert refund record
+  db.runSync(
+    'INSERT INTO held_returns (id, held_id, expense_id, account_id, returned_amount, principal_returned, profit_loss, friend_profit_share, keep_principal, keep_profit, date, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    id, heldId, expenseId, accountId, amt, princ, pLoss, fShare, kp, kpr, d, note || null
+  );
+
+  // 1. Account balance adjustment: Add returnedAmount to receiving account
+  db.runSync('UPDATE accounts SET balance = balance + ? WHERE id = ?', amt, accountId);
+
+  // 2. Account balance adjustment: If principal was returned immediately, subtract from account
+  if (!keepPrincipal) {
+    db.runSync('UPDATE accounts SET balance = balance - ? WHERE id = ?', princ, accountId);
+  }
+
+  // 3. Account balance adjustment: If friend's profit share was returned immediately, subtract from account
+  if (!keepProfit && fShare > 0) {
+    db.runSync('UPDATE accounts SET balance = balance - ? WHERE id = ?', fShare, accountId);
+  }
+
+  // 4. Update held fund entry:
+  // - Subtract principalReturned from used
+  db.runSync('UPDATE held_funds SET used = used - ? WHERE id = ?', princ, heldId);
+
+  // - Adjust held_funds amount if principal returned immediately
+  if (!keepPrincipal) {
+    db.runSync('UPDATE held_funds SET amount = amount - ? WHERE id = ?', princ, heldId);
+  }
+
+  // - Adjust held_funds amount if keeping profit share as held
+  if (keepProfit && fShare > 0) {
+    db.runSync('UPDATE held_funds SET amount = amount + ? WHERE id = ?', fShare, heldId);
+  }
+
+  return id;
+}
+
 // 5. Database Backup and Restore
 export function exportDbToJson() {
   const accounts = db.getAllSync('SELECT * FROM accounts');
@@ -289,21 +388,23 @@ export function exportDbToJson() {
   const expenses = db.getAllSync('SELECT * FROM expenses');
   const held_funds = db.getAllSync('SELECT * FROM held_funds');
   const borrowings = db.getAllSync('SELECT * FROM borrowings');
+  const held_returns = db.getAllSync('SELECT * FROM held_returns');
 
   return JSON.stringify({
-    version: 'sqlite-hisab-v1',
+    version: 'sqlite-hisab-v2',
     accounts,
     incomes,
     transfers,
     expenses,
     held_funds,
-    borrowings
+    borrowings,
+    held_returns
   });
 }
 
 export function importJsonToDb(jsonString) {
   const data = JSON.parse(jsonString);
-  if (!data || data.version !== 'sqlite-hisab-v1') {
+  if (!data || (data.version !== 'sqlite-hisab-v1' && data.version !== 'sqlite-hisab-v2')) {
     throw new Error('Invalid backup format');
   }
 
@@ -314,6 +415,7 @@ export function importJsonToDb(jsonString) {
   db.runSync('DELETE FROM expenses');
   db.runSync('DELETE FROM held_funds');
   db.runSync('DELETE FROM borrowings');
+  db.runSync('DELETE FROM held_returns');
 
   // RESTORE Accounts
   if (Array.isArray(data.accounts)) {
@@ -357,6 +459,16 @@ export function importJsonToDb(jsonString) {
   if (Array.isArray(data.borrowings)) {
     for (const b of data.borrowings) {
       db.runSync('INSERT INTO borrowings (id, person, amount, repaid, account_id, note, date) VALUES (?, ?, ?, ?, ?, ?, ?)', b.id, b.person, b.amount, b.repaid, b.account_id, b.note, b.date);
+    }
+  }
+
+  // RESTORE Held Returns
+  if (Array.isArray(data.held_returns)) {
+    for (const r of data.held_returns) {
+      db.runSync(
+        'INSERT INTO held_returns (id, held_id, expense_id, account_id, returned_amount, principal_returned, profit_loss, friend_profit_share, keep_principal, keep_profit, date, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        r.id, r.held_id, r.expense_id, r.account_id, Number(r.returned_amount), Number(r.principal_returned), Number(r.profit_loss), Number(r.friend_profit_share), Number(r.keep_principal), Number(r.keep_profit), r.date, r.note
+      );
     }
   }
 }
