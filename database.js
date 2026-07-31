@@ -86,9 +86,17 @@ export function initDb() {
       keep_principal INTEGER NOT NULL,
       keep_profit INTEGER NOT NULL,
       date TEXT NOT NULL,
-      note TEXT
+      note TEXT,
+      income_id TEXT
     );
   `);
+
+  // Migration: Add income_id column to held_returns if it doesn't exist
+  try {
+    db.execSync('ALTER TABLE held_returns ADD COLUMN income_id TEXT;');
+  } catch (e) {
+    // Column already exists, safe to ignore
+  }
 
   // Insert default accounts if none exist
   const accountCount = db.getFirstSync('SELECT COUNT(*) as cnt FROM accounts');
@@ -302,7 +310,12 @@ export function deleteTransaction(type, transactionId) {
       db.runSync('UPDATE held_funds SET amount = amount - ? WHERE id = ?', fShare, item.held_id);
     }
 
-    // 3. Delete record
+    // 3. Revert personal income if logged
+    if (item.income_id) {
+      db.runSync('DELETE FROM incomes WHERE id = ?', item.income_id);
+    }
+
+    // 4. Delete record
     db.runSync('DELETE FROM held_returns WHERE id = ?', transactionId);
   }
 
@@ -344,14 +357,25 @@ export function addHeldReturn(heldId, expenseId, accountId, returnedAmount, prin
   const kp = keepPrincipal ? 1 : 0;
   const kpr = keepProfit ? 1 : 0;
 
-  // Insert refund record
+  const myShare = pLoss - fShare;
+  let incId = null;
+  if (myShare > 0) {
+    const personName = db.getFirstSync('SELECT person FROM held_funds WHERE id = ?', heldId)?.person || '';
+    const sourceStr = `Profit Share (${personName})`;
+    incId = addIncome(sourceStr, myShare, accountId, d);
+  }
+
+  // Insert refund record with income_id
   db.runSync(
-    'INSERT INTO held_returns (id, held_id, expense_id, account_id, returned_amount, principal_returned, profit_loss, friend_profit_share, keep_principal, keep_profit, date, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    id, heldId, expenseId, accountId, amt, princ, pLoss, fShare, kp, kpr, d, note || null
+    'INSERT INTO held_returns (id, held_id, expense_id, account_id, returned_amount, principal_returned, profit_loss, friend_profit_share, keep_principal, keep_profit, date, note, income_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    id, heldId, expenseId, accountId, amt, princ, pLoss, fShare, kp, kpr, d, note || null, incId
   );
 
   // 1. Account balance adjustment: Add returnedAmount to receiving account
-  db.runSync('UPDATE accounts SET balance = balance + ? WHERE id = ?', amt, accountId);
+  // If myShare was logged as income, that already added myShare to the balance.
+  // So we only add the remaining amount: amt - myShare
+  const balanceAddAmt = myShare > 0 ? (amt - myShare) : amt;
+  db.runSync('UPDATE accounts SET balance = balance + ? WHERE id = ?', balanceAddAmt, accountId);
 
   // 2. Account balance adjustment: If principal was returned immediately, subtract from account
   if (!keepPrincipal) {
@@ -466,8 +490,8 @@ export function importJsonToDb(jsonString) {
   if (Array.isArray(data.held_returns)) {
     for (const r of data.held_returns) {
       db.runSync(
-        'INSERT INTO held_returns (id, held_id, expense_id, account_id, returned_amount, principal_returned, profit_loss, friend_profit_share, keep_principal, keep_profit, date, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        r.id, r.held_id, r.expense_id, r.account_id, Number(r.returned_amount), Number(r.principal_returned), Number(r.profit_loss), Number(r.friend_profit_share), Number(r.keep_principal), Number(r.keep_profit), r.date, r.note
+        'INSERT INTO held_returns (id, held_id, expense_id, account_id, returned_amount, principal_returned, profit_loss, friend_profit_share, keep_principal, keep_profit, date, note, income_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        r.id, r.held_id, r.expense_id, r.account_id, Number(r.returned_amount), Number(r.principal_returned), Number(r.profit_loss), Number(r.friend_profit_share), Number(r.keep_principal), Number(r.keep_profit), r.date, r.note, r.income_id || null
       );
     }
   }

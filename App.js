@@ -1650,6 +1650,8 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldReturns, inco
 
   const refundAmt = Number(amount) || 0;
   const princAmt = Number(principalReturned) || 0;
+  const friendShareVal = Number(friendProfitShare) || 0;
+  const myShareVal = (refundAmt - princAmt) - friendShareVal;
 
   const handleSubmit = () => {
     if (modal.type === "addAccount") {
@@ -2026,6 +2028,13 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldReturns, inco
                   <TextInput style={styles.btrInput} keyboardType="numeric" placeholder="0" placeholderTextColor="#52626C" value={friendProfitShare} onChangeText={setFriendProfitShare} />
                 </View>
 
+                <View style={{ marginTop: 12, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <Text style={styles.btrLabel}>{t("myProfitShare")}</Text>
+                  <Text style={[styles.accountBalanceText, { color: myShareVal >= 0 ? "#4FD1AE" : "#E8768A" }]}>
+                    {IndianRupee(myShareVal)}
+                  </Text>
+                </View>
+
                 <View style={{ marginTop: 12 }}>
                   <Text style={styles.btrLabel}>{t("goesInto")}</Text>
                   <View style={styles.pickerWrapper}>
@@ -2040,7 +2049,7 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldReturns, inco
                     style={[styles.segBtn, { flex: 0, width: 80 }, keepPrincipal && styles.segBtnActive]}
                   >
                     <Text style={[styles.segBtnText, keepPrincipal && styles.segBtnTextActive]}>
-                      {keepPrincipal ? t("save") : t("cancel")}
+                      {keepPrincipal ? t("keepLabel") : t("returnLabel")}
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -2053,7 +2062,7 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldReturns, inco
                       style={[styles.segBtn, { flex: 0, width: 80 }, keepProfit && styles.segBtnActive]}
                     >
                       <Text style={[styles.segBtnText, keepProfit && styles.segBtnTextActive]}>
-                        {keepProfit ? t("save") : t("cancel")}
+                        {keepProfit ? t("keepLabel") : t("returnLabel")}
                       </Text>
                     </TouchableOpacity>
                   </View>
