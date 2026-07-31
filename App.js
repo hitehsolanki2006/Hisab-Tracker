@@ -517,6 +517,8 @@ export default function App() {
           accounts={accounts}
           heldFunds={heldFunds}
           borrowings={borrowings}
+          heldReturns={heldReturns}
+          incomeSources={incomeSources}
           heldRemaining={heldRemaining}
           borrowRemaining={borrowRemaining}
           defaultSavingId={defaultSavingId}
@@ -1790,7 +1792,7 @@ function ModalRouter({ modal, accounts, heldFunds, borrowings, heldReturns, inco
               <View>
                 <Text style={styles.btrLabel}>{t("source")}</Text>
                 <View style={styles.segControl}>
-                  {[...incomeSources, t("other")].map((sKey) => (
+                  {[...(incomeSources || []), t("other")].map((sKey) => (
                     <TouchableOpacity
                       key={sKey}
                       onPress={() => {
